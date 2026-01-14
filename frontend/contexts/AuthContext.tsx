@@ -1,10 +1,8 @@
 import React, { createContext, useState, useEffect, useContext } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import axios from 'axios';
+import { supabase } from '../lib/supabase';
+import { Session, User } from '@supabase/supabase-js';
 
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-
-interface User {
+interface UserProfile {
   id: string;
   name: string;
   email: string;
@@ -13,99 +11,113 @@ interface User {
 }
 
 interface AuthContextType {
-  user: User | null;
-  token: string | null;
-  login: (email: string, password: string) => Promise<void>;
-  register: (name: string, email: string, password: string) => Promise<void>;
-  logout: () => Promise<void>;
+  session: Session | null;
+  user: UserProfile | null;
   loading: boolean;
+  signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string, name: string) => Promise<void>;
+  signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    loadStoredAuth();
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      if (session) {
+        loadUserProfile(session.user.id);
+      } else {
+        setLoading(false);
+      }
+    });
+
+    // Listen for auth changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      if (session) {
+        loadUserProfile(session.user.id);
+      } else {
+        setUser(null);
+        setLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
-  const loadStoredAuth = async () => {
+  const loadUserProfile = async (userId: string) => {
     try {
-      const storedToken = await AsyncStorage.getItem('token');
-      const storedUser = await AsyncStorage.getItem('user');
-      
-      if (storedToken && storedUser) {
-        setToken(storedToken);
-        setUser(JSON.parse(storedUser));
-        axios.defaults.headers.common['Authorization'] = `Bearer ${storedToken}`;
-      }
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (error) throw error;
+      setUser(data);
     } catch (error) {
-      console.error('Error loading auth:', error);
+      console.error('Error loading user profile:', error);
     } finally {
       setLoading(false);
     }
   };
 
-  const login = async (email: string, password: string) => {
-    try {
-      const response = await axios.post(`${API_URL}/api/auth/login`, { email, password });
-      const { access_token, user: userData } = response.data;
-      
-      await AsyncStorage.setItem('token', access_token);
-      await AsyncStorage.setItem('user', JSON.stringify(userData));
-      
-      setToken(access_token);
-      setUser(userData);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
-    } catch (error: any) {
-      throw new Error(error.response?.data?.detail || 'Login failed');
-    }
+  const signIn = async (email: string, password: string) => {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) throw error;
   };
 
-  const register = async (name: string, email: string, password: string) => {
-    try {
-      const response = await axios.post(`${API_URL}/api/auth/register`, { name, email, password, role: 'manager' });
-      const { access_token, user: userData } = response.data;
-      
-      await AsyncStorage.setItem('token', access_token);
-      await AsyncStorage.setItem('user', JSON.stringify(userData));
-      
-      setToken(access_token);
-      setUser(userData);
-      axios.defaults.headers.common['Authorization'] = `Bearer ${access_token}`;
-    } catch (error: any) {
-      throw new Error(error.response?.data?.detail || 'Registration failed');
-    }
+  const signUp = async (email: string, password: string, name: string) => {
+    // First, create auth user
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email,
+      password,
+    });
+
+    if (authError) throw authError;
+    if (!authData.user) throw new Error('User creation failed');
+
+    // Then create user profile
+    const { error: profileError } = await supabase
+      .from('users')
+      .insert([
+        {
+          id: authData.user.id,
+          email,
+          name,
+          role: 'manager',
+          cash_balance: 0,
+        },
+      ]);
+
+    if (profileError) throw profileError;
   };
 
-  const logout = async () => {
-    await AsyncStorage.removeItem('token');
-    await AsyncStorage.removeItem('user');
-    setToken(null);
+  const signOut = async () => {
+    const { error } = await supabase.auth.signOut();
+    if (error) throw error;
     setUser(null);
-    delete axios.defaults.headers.common['Authorization'];
   };
 
   const refreshUser = async () => {
-    try {
-      if (!token) return;
-      const response = await axios.get(`${API_URL}/api/auth/me`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const userData = response.data;
-      setUser(userData);
-      await AsyncStorage.setItem('user', JSON.stringify(userData));
-    } catch (error) {
-      console.error('Error refreshing user:', error);
+    if (session?.user.id) {
+      await loadUserProfile(session.user.id);
     }
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, login, register, logout, loading, refreshUser }}>
+    <AuthContext.Provider value={{ session, user, loading, signIn, signUp, signOut, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

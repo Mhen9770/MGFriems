@@ -21,7 +21,7 @@ export default function Register() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const { register } = useAuth();
+  const { signUp } = useAuth();
   const router = useRouter();
 
   const handleRegister = async () => {
@@ -42,10 +42,12 @@ export default function Register() {
 
     setLoading(true);
     try {
-      await register(name, email, password);
-      router.replace('/(tabs)/dashboard');
+      await signUp(email, password, name);
+      Alert.alert('Success', 'Account created! Please login.', [
+        { text: 'OK', onPress: () => router.replace('/(auth)/login') }
+      ]);
     } catch (error: any) {
-      Alert.alert('Registration Failed', error.message);
+      Alert.alert('Registration Failed', error.message || 'Please try again');
     } finally {
       setLoading(false);
     }
