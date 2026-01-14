@@ -6,64 +6,91 @@ import {
   ScrollView,
   RefreshControl,
   TouchableOpacity,
-  SafeAreaView,
+  Dimensions,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useAuth } from '../../contexts/AuthContext';
 import { supabase } from '../../lib/supabase';
-import { useRouter } from 'expo-router';
+import { Colors, Spacing, FontSizes, BorderRadius, Shadows } from '../../constants/theme';
+import Card from '../../components/Card';
+import GradientCard from '../../components/GradientCard';
+import LoadingSpinner from '../../components/LoadingSpinner';
 
-interface Manager {
-  id: string;
-  name: string;
-  cash_balance: number;
-}
-
-interface PendingTransfer {
-  id: string;
-  from_user_name: string;
-  amount: number;
-  reason: string;
-  created_at: string;
-}
+const { width } = Dimensions.get('window');
 
 export default function Dashboard() {
   const { user, refreshUser } = useAuth();
-  const router = useRouter();
-  const [managers, setManagers] = useState<Manager[]>([]);
-  const [pendingTransfers, setPendingTransfers] = useState<PendingTransfer[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [stats, setStats] = useState({
+    totalSales: 0,
+    todaySales: 0,
+    pendingPayments: 0,
+    lowStockItems: 0,
+    productionOrders: 0,
+    customers: 0,
+  });
+  const [recentActivity, setRecentActivity] = useState<any[]>([]);
+  const [pendingTransfers, setPendingTransfers] = useState<any[]>([]);
 
   useEffect(() => {
     loadDashboardData();
-  }, [user]);
+  }, []);
 
   const loadDashboardData = async () => {
     try {
-      // Load all managers
-      const { data: managersData, error: managersError } = await supabase
-        .from('users')
-        .select('id, name, cash_balance')
-        .eq('role', 'manager')
-        .order('name');
+      // Get stats
+      const [salesData, customersData, productsData, productionData, transfersData] = await Promise.all([
+        supabase.from('sales_orders').select('total_amount, order_date, payment_status'),
+        supabase.from('customers').select('id'),
+        supabase.from('products').select('current_stock, reorder_level'),
+        supabase.from('production_orders').select('status'),
+        user ? supabase.from('transfer_requests').select('*').eq('to_user_id', user.id).eq('status', 'pending') : null,
+      ]);
 
-      if (managersError) throw managersError;
-      setManagers(managersData || []);
+      const today = new Date().toISOString().split('T')[0];
+      const todaySalesAmount = salesData.data
+        ?.filter(s => s.order_date === today)
+        .reduce((sum, s) => sum + parseFloat(s.total_amount as any), 0) || 0;
 
-      // Load pending transfers for current user
-      if (user) {
-        const { data: transfersData, error: transfersError } = await supabase
-          .from('transfer_requests')
-          .select('*')
-          .eq('to_user_id', user.id)
-          .eq('status', 'pending')
-          .order('created_at', { ascending: false });
+      const totalSalesAmount = salesData.data
+        ?.reduce((sum, s) => sum + parseFloat(s.total_amount as any), 0) || 0;
 
-        if (transfersError) throw transfersError;
-        setPendingTransfers(transfersData || []);
+      const pendingPaymentsCount = salesData.data
+        ?.filter(s => s.payment_status === 'pending' || s.payment_status === 'partial')
+        .length || 0;
+
+      const lowStockCount = productsData.data
+        ?.filter(p => p.current_stock <= p.reorder_level)
+        .length || 0;
+
+      const productionCount = productionData.data
+        ?.filter(p => p.status === 'planned' || p.status === 'in_progress')
+        .length || 0;
+
+      setStats({
+        totalSales: totalSalesAmount,
+        todaySales: todaySalesAmount,
+        pendingPayments: pendingPaymentsCount,
+        lowStockItems: lowStockCount,
+        productionOrders: productionCount,
+        customers: customersData.data?.length || 0,
+      });
+
+      if (transfersData?.data) {
+        setPendingTransfers(transfersData.data);
       }
 
+      // Get recent sales for activity
+      const { data: recentSales } = await supabase
+        .from('sales_orders')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      setRecentActivity(recentSales || []);
       await refreshUser();
     } catch (error) {
       console.error('Error loading dashboard:', error);
@@ -80,142 +107,150 @@ export default function Dashboard() {
 
   const handleApproveTransfer = async (transferId: string) => {
     try {
-      const { error } = await supabase
+      await supabase
         .from('transfer_requests')
-        .update({ 
-          status: 'approved', 
-          approved_at: new Date().toISOString() 
-        })
+        .update({ status: 'approved', approved_at: new Date().toISOString() })
         .eq('id', transferId);
-
-      if (error) throw error;
       loadDashboardData();
     } catch (error) {
       console.error('Error approving transfer:', error);
     }
   };
 
-  const handleRejectTransfer = async (transferId: string) => {
-    try {
-      const { error } = await supabase
-        .from('transfer_requests')
-        .update({ 
-          status: 'rejected', 
-          approved_at: new Date().toISOString() 
-        })
-        .eq('id', transferId);
-
-      if (error) throw error;
-      loadDashboardData();
-    } catch (error) {
-      console.error('Error rejecting transfer:', error);
-    }
-  };
+  if (loading) {
+    return <LoadingSpinner />;
+  }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      {/* Header */}
       <View style={styles.header}>
         <View>
           <Text style={styles.greeting}>Welcome back,</Text>
-          <Text style={styles.name}>{user?.name || 'Manager'}</Text>
+          <Text style={styles.name}>{user?.name}</Text>
         </View>
-        <Ionicons name="notifications-outline" size={28} color="#111827" />
+        <TouchableOpacity style={styles.notificationButton}>
+          <Ionicons name="notifications-outline" size={24} color={Colors.text} />
+          {pendingTransfers.length > 0 && <View style={styles.badge} />}
+        </TouchableOpacity>
       </View>
 
       <ScrollView
         style={styles.content}
+        showsVerticalScrollIndicator={false}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} />
+          <RefreshControl refreshing={refreshing} onRefresh={handleRefresh} colors={[Colors.primary]} />
         }
       >
-        {/* My Cash Balance */}
-        <View style={styles.balanceCard}>
+        {/* Cash Balance Card */}
+        <GradientCard colors={Colors.gradient1} style={styles.balanceCard}>
           <View style={styles.balanceHeader}>
-            <Ionicons name="wallet" size={32} color="#FFFFFF" />
-            <Text style={styles.balanceLabel}>My Cash Balance</Text>
+            <Ionicons name="wallet" size={32} color="#FFF" />
+            <Text style={styles.balanceLabel}>Your Cash Balance</Text>
           </View>
-          <Text style={styles.balanceAmount}>
-            ₹{user?.cash_balance?.toLocaleString('en-IN') || '0'}
-          </Text>
-        </View>
+          <Text style={styles.balanceAmount}>₹{user?.cash_balance?.toLocaleString('en-IN') || '0'}</Text>
+          <View style={styles.balanceFooter}>
+            <View style={styles.balanceItem}>
+              <Text style={styles.balanceItemLabel}>Today's Sales</Text>
+              <Text style={styles.balanceItemValue}>₹{stats.todaySales.toLocaleString('en-IN')}</Text>
+            </View>
+            <View style={styles.balanceDivider} />
+            <View style={styles.balanceItem}>
+              <Text style={styles.balanceItemLabel}>Total Sales</Text>
+              <Text style={styles.balanceItemValue}>₹{stats.totalSales.toLocaleString('en-IN')}</Text>
+            </View>
+          </View>
+        </GradientCard>
 
-        {/* Pending Approvals */}
+        {/* Pending Transfer Approvals */}
         {pendingTransfers.length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>Pending Approvals</Text>
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>{pendingTransfers.length}</Text>
+              <View style={styles.countBadge}>
+                <Text style={styles.countBadgeText}>{pendingTransfers.length}</Text>
               </View>
             </View>
-
             {pendingTransfers.map((transfer) => (
-              <View key={transfer.id} style={styles.transferCard}>
-                <View style={styles.transferInfo}>
-                  <Text style={styles.transferFrom}>{transfer.from_user_name}</Text>
-                  <Text style={styles.transferAmount}>
-                    ₹{transfer.amount.toLocaleString('en-IN')}
-                  </Text>
-                  <Text style={styles.transferReason}>{transfer.reason}</Text>
-                </View>
-                <View style={styles.transferActions}>
+              <Card key={transfer.id} style={styles.transferCard}>
+                <View style={styles.transferHeader}>
+                  <View>
+                    <Text style={styles.transferFrom}>{transfer.from_user_name}</Text>
+                    <Text style={styles.transferAmount}>₹{transfer.amount.toLocaleString('en-IN')}</Text>
+                  </View>
                   <TouchableOpacity
                     style={styles.approveButton}
                     onPress={() => handleApproveTransfer(transfer.id)}
                   >
-                    <Ionicons name="checkmark" size={20} color="#FFFFFF" />
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.rejectButton}
-                    onPress={() => handleRejectTransfer(transfer.id)}
-                  >
-                    <Ionicons name="close" size={20} color="#FFFFFF" />
+                    <Ionicons name="checkmark-circle" size={32} color={Colors.success} />
                   </TouchableOpacity>
                 </View>
-              </View>
+                <Text style={styles.transferReason}>{transfer.reason}</Text>
+              </Card>
             ))}
           </View>
         )}
 
-        {/* All Managers Cash Positions */}
+        {/* Quick Stats */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Partners Cash Position</Text>
-          {managers.map((manager) => (
-            <View key={manager.id} style={styles.managerCard}>
-              <View style={styles.managerAvatar}>
-                <Ionicons name="person" size={24} color="#4F46E5" />
+          <Text style={styles.sectionTitle}>Quick Stats</Text>
+          <View style={styles.statsGrid}>
+            <Card style={styles.statCard}>
+              <View style={[styles.statIcon, { backgroundColor: Colors.primary + '20' }]}>
+                <Ionicons name="people" size={24} color={Colors.primary} />
               </View>
-              <View style={styles.managerInfo}>
-                <Text style={styles.managerName}>{manager.name}</Text>
-                <Text style={styles.managerRole}>Manager</Text>
+              <Text style={styles.statValue}>{stats.customers}</Text>
+              <Text style={styles.statLabel}>Customers</Text>
+            </Card>
+            <Card style={styles.statCard}>
+              <View style={[styles.statIcon, { backgroundColor: Colors.warning + '20' }]}>
+                <Ionicons name="alert-circle" size={24} color={Colors.warning} />
               </View>
-              <Text style={styles.managerBalance}>
-                ₹{manager.cash_balance?.toLocaleString('en-IN') || '0'}
-              </Text>
-            </View>
+              <Text style={styles.statValue}>{stats.pendingPayments}</Text>
+              <Text style={styles.statLabel}>Pending Payments</Text>
+            </Card>
+            <Card style={styles.statCard}>
+              <View style={[styles.statIcon, { backgroundColor: Colors.danger + '20' }]}>
+                <Ionicons name="cube" size={24} color={Colors.danger} />
+              </View>
+              <Text style={styles.statValue}>{stats.lowStockItems}</Text>
+              <Text style={styles.statLabel}>Low Stock</Text>
+            </Card>
+            <Card style={styles.statCard}>
+              <View style={[styles.statIcon, { backgroundColor: Colors.success + '20' }]}>
+                <Ionicons name="construct" size={24} color={Colors.success} />
+              </View>
+              <Text style={styles.statValue}>{stats.productionOrders}</Text>
+              <Text style={styles.statLabel}>Production</Text>
+            </Card>
+          </View>
+        </View>
+
+        {/* Recent Activity */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Recent Sales</Text>
+          {recentActivity.map((sale) => (
+            <Card key={sale.id} style={styles.activityCard}>
+              <View style={styles.activityHeader}>
+                <View style={styles.activityIcon}>
+                  <Ionicons name="receipt" size={20} color={Colors.primary} />
+                </View>
+                <View style={styles.activityContent}>
+                  <Text style={styles.activityTitle}>{sale.invoice_number}</Text>
+                  <Text style={styles.activitySubtitle}>{sale.customer_name}</Text>
+                </View>
+                <View style={styles.activityRight}>
+                  <Text style={styles.activityAmount}>₹{parseFloat(sale.total_amount).toLocaleString('en-IN')}</Text>
+                  <Text style={[styles.activityStatus, sale.payment_type === 'cash' ? styles.statusCash : styles.statusCredit]}>
+                    {sale.payment_type.toUpperCase()}
+                  </Text>
+                </View>
+              </View>
+            </Card>
           ))}
         </View>
 
-        {/* Quick Actions */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.quickActions}>
-            <TouchableOpacity 
-              style={styles.actionCard}
-              onPress={() => router.push('/(tabs)/sales')}
-            >
-              <Ionicons name="add-circle" size={32} color="#4F46E5" />
-              <Text style={styles.actionText}>New Sale</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              style={styles.actionCard}
-              onPress={() => router.push('/(tabs)/production')}
-            >
-              <Ionicons name="construct" size={32} color="#10B981" />
-              <Text style={styles.actionText}>Production</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
+        <View style={{ height: 100 }} />
       </ScrollView>
     </SafeAreaView>
   );
@@ -224,181 +259,222 @@ export default function Dashboard() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F9FAFB',
+    backgroundColor: Colors.background,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 24,
-    backgroundColor: '#FFFFFF',
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    backgroundColor: Colors.surface,
     borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
+    borderBottomColor: Colors.border,
   },
   greeting: {
-    fontSize: 14,
-    color: '#6B7280',
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
   },
   name: {
-    fontSize: 24,
+    fontSize: FontSizes.xxl,
     fontWeight: 'bold',
-    color: '#111827',
+    color: Colors.text,
     marginTop: 4,
+  },
+  notificationButton: {
+    position: 'relative',
+  },
+  badge: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: Colors.danger,
   },
   content: {
     flex: 1,
   },
   balanceCard: {
-    backgroundColor: '#4F46E5',
-    margin: 24,
-    padding: 24,
-    borderRadius: 16,
+    margin: Spacing.lg,
+    marginBottom: Spacing.md,
   },
   balanceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: Spacing.md,
   },
   balanceLabel: {
-    fontSize: 16,
-    color: '#FFFFFF',
-    marginLeft: 12,
+    fontSize: FontSizes.md,
+    color: '#FFF',
+    marginLeft: Spacing.sm,
     opacity: 0.9,
   },
   balanceAmount: {
     fontSize: 36,
     fontWeight: 'bold',
-    color: '#FFFFFF',
+    color: '#FFF',
+    marginBottom: Spacing.lg,
+  },
+  balanceFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    paddingTop: Spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255,255,255,0.3)',
+  },
+  balanceItem: {
+    alignItems: 'center',
+  },
+  balanceItemLabel: {
+    fontSize: FontSizes.xs,
+    color: '#FFF',
+    opacity: 0.8,
+  },
+  balanceItemValue: {
+    fontSize: FontSizes.lg,
+    fontWeight: 'bold',
+    color: '#FFF',
+    marginTop: 4,
+  },
+  balanceDivider: {
+    width: 1,
+    backgroundColor: 'rgba(255,255,255,0.3)',
   },
   section: {
-    paddingHorizontal: 24,
-    marginBottom: 24,
+    paddingHorizontal: Spacing.lg,
+    marginBottom: Spacing.lg,
   },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: Spacing.md,
   },
   sectionTitle: {
-    fontSize: 18,
+    fontSize: FontSizes.lg,
     fontWeight: 'bold',
-    color: '#111827',
-    marginBottom: 16,
+    color: Colors.text,
   },
-  badge: {
-    backgroundColor: '#EF4444',
-    borderRadius: 12,
+  countBadge: {
+    backgroundColor: Colors.danger,
+    borderRadius: BorderRadius.full,
     paddingHorizontal: 8,
     paddingVertical: 2,
-    marginLeft: 8,
+    marginLeft: Spacing.sm,
   },
-  badgeText: {
-    color: '#FFFFFF',
-    fontSize: 12,
+  countBadgeText: {
+    color: Colors.surface,
+    fontSize: FontSizes.xs,
     fontWeight: 'bold',
   },
   transferCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 12,
-    marginBottom: 12,
+    marginBottom: Spacing.sm,
+  },
+  transferHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#FEE2E2',
-  },
-  transferInfo: {
-    flex: 1,
+    marginBottom: Spacing.sm,
   },
   transferFrom: {
-    fontSize: 16,
+    fontSize: FontSizes.md,
     fontWeight: '600',
-    color: '#111827',
+    color: Colors.text,
   },
   transferAmount: {
-    fontSize: 20,
+    fontSize: FontSizes.xl,
     fontWeight: 'bold',
-    color: '#4F46E5',
+    color: Colors.primary,
     marginTop: 4,
   },
   transferReason: {
-    fontSize: 14,
-    color: '#6B7280',
-    marginTop: 4,
-  },
-  transferActions: {
-    flexDirection: 'row',
-    gap: 8,
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
   },
   approveButton: {
-    backgroundColor: '#10B981',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
+    padding: Spacing.sm,
   },
-  rejectButton: {
-    backgroundColor: '#EF4444',
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  managerCard: {
-    backgroundColor: '#FFFFFF',
-    padding: 16,
-    borderRadius: 12,
-    marginBottom: 12,
+  statsGrid: {
     flexDirection: 'row',
-    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginHorizontal: -Spacing.xs,
   },
-  managerAvatar: {
+  statCard: {
+    width: (width - Spacing.lg * 2 - Spacing.xs * 2) / 2,
+    margin: Spacing.xs,
+    alignItems: 'center',
+    paddingVertical: Spacing.lg,
+  },
+  statIcon: {
     width: 48,
     height: 48,
-    borderRadius: 24,
-    backgroundColor: '#EEF2FF',
+    borderRadius: BorderRadius.full,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+  },
+  statValue: {
+    fontSize: FontSizes.xxl,
+    fontWeight: 'bold',
+    color: Colors.text,
+    marginBottom: 4,
+  },
+  statLabel: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
+  },
+  activityCard: {
+    marginBottom: Spacing.sm,
+  },
+  activityHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  activityIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: BorderRadius.md,
+    backgroundColor: Colors.primary + '20',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  managerInfo: {
+  activityContent: {
     flex: 1,
-    marginLeft: 12,
+    marginLeft: Spacing.md,
   },
-  managerName: {
-    fontSize: 16,
+  activityTitle: {
+    fontSize: FontSizes.md,
     fontWeight: '600',
-    color: '#111827',
+    color: Colors.text,
   },
-  managerRole: {
-    fontSize: 14,
-    color: '#6B7280',
+  activitySubtitle: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
     marginTop: 2,
   },
-  managerBalance: {
-    fontSize: 18,
+  activityRight: {
+    alignItems: 'flex-end',
+  },
+  activityAmount: {
+    fontSize: FontSizes.md,
     fontWeight: 'bold',
-    color: '#4F46E5',
+    color: Colors.text,
   },
-  quickActions: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  actionCard: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-    padding: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  actionText: {
-    fontSize: 14,
+  activityStatus: {
+    fontSize: FontSizes.xs,
     fontWeight: '600',
-    color: '#111827',
-    marginTop: 8,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: BorderRadius.sm,
+  },
+  statusCash: {
+    backgroundColor: Colors.success + '20',
+    color: Colors.success,
+  },
+  statusCredit: {
+    backgroundColor: Colors.warning + '20',
+    color: Colors.warning,
   },
 });
